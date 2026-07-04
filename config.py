@@ -11,16 +11,6 @@ class Config:
     # Spoonacular API Key (OPTIONAL - bot works without it)
     SPOONACULAR_API_KEY = os.getenv('SPOONACULAR_API_KEY', '')
     
-    # Webhook URL (set this on Railway)
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
-    
-    # Use webhook (True) or polling (False)
-    USE_WEBHOOK = os.getenv('USE_WEBHOOK', 'false').lower() == 'true'
-    
-    # Flask configuration
-    PORT = int(os.getenv('PORT', 5000))
-    DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
-    
     # API settings
     API_TIMEOUT = int(os.getenv('API_TIMEOUT', 15))
-    MAX_RECIPES = int(os.getenv('MAX_RECIPES', 5))
+    MAX_RECIPES = int(os.getenv('MAX_RECIPES', 3))
