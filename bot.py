@@ -4,6 +4,7 @@ import logging
 import json
 import requests
 import random
+import time
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -17,13 +18,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app
+# Initialize Flask app (needed for Railway health checks)
 app = Flask(__name__)
 
 # Bot configuration
 BOT_TOKEN = Config.TELEGRAM_BOT_TOKEN
 SPOONACULAR_API_KEY = Config.SPOONACULAR_API_KEY
-WEBHOOK_URL = Config.WEBHOOK_URL
 
 # Initialize bot
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -35,6 +35,8 @@ user_sessions = {}
 HAS_API = bool(SPOONACULAR_API_KEY)
 if not HAS_API:
     logger.warning("⚠️ SPOONACULAR_API_KEY not set. Using mock recipes only.")
+else:
+    logger.info("✅ Spoonacular API key found. Using real recipes.")
 
 # ========================
 # TELEGRAM BOT HANDLERS
@@ -202,10 +204,10 @@ def cuisine_search(message):
     
     # Fallback: Suggest mock recipes
     mock_keywords = {
-        'italian': ['pasta', 'spaghetti'],
-        'mexican': ['tacos', 'enchiladas'],
-        'chinese': ['stir fry', 'noodles'],
-        'indian': ['curry', 'tikka']
+        'italian': ['pasta', 'spaghetti', 'lasagna'],
+        'mexican': ['tacos', 'enchiladas', 'burritos'],
+        'chinese': ['stir fry', 'noodles', 'fried rice'],
+        'indian': ['curry', 'tikka', 'biryani']
     }
     
     suggestions = mock_keywords.get(cuisine_type.lower(), ['pasta', 'salad', 'chicken'])
@@ -467,20 +469,8 @@ def handle_details_callback(call):
     )
 
 # ========================
-# FLASK WEBHOOK ROUTES
+# FLASK ROUTES (For Railway Health Checks)
 # ========================
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Handle incoming webhook requests from Telegram"""
-    try:
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return jsonify({'status': 'ok'}), 200
-    except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/')
 def index():
@@ -489,7 +479,8 @@ def index():
         'status': 'active',
         'bot': '@RecipeFiinderBot',
         'version': '1.0.0',
-        'api_connected': HAS_API
+        'api_connected': HAS_API,
+        'mode': 'polling'
     })
 
 @app.route('/health', methods=['GET'])
@@ -498,49 +489,27 @@ def health_check():
     return jsonify({'status': 'healthy', 'api': HAS_API}), 200
 
 # ========================
-# SETUP WEBHOOK
-# ========================
-
-def setup_webhook():
-    """Set up Telegram webhook"""
-    if not WEBHOOK_URL:
-        logger.info("⚠️ No WEBHOOK_URL set. Using polling mode.")
-        return False
-    
-    webhook_url = f"{WEBHOOK_URL}/webhook"
-    
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
-            json={'url': webhook_url}
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok'):
-                logger.info(f"✅ Webhook set successfully: {webhook_url}")
-                return True
-    except Exception as e:
-        logger.error(f"❌ Webhook setup exception: {str(e)}")
-    
-    return False
-
-# ========================
 # APPLICATION ENTRY POINT
 # ========================
 
 if __name__ == '__main__':
     logger.info("🤖 RecipeFiinderBot starting...")
     logger.info(f"📊 API Status: {'Connected' if HAS_API else 'Using mock recipes'}")
+    logger.info("✅ Bot is running in POLLING mode (more reliable for Railway)")
     
-    if Config.USE_WEBHOOK:
-        setup_webhook()
-        port = int(os.environ.get('PORT', 5000))
-        app.run(host='0.0.0.0', port=port)
-    else:
-        logger.info("Starting bot in polling mode...")
+    # Remove webhook to ensure polling works
+    try:
+        bot.remove_webhook()
+        logger.info("✅ Webhook removed successfully")
+    except Exception as e:
+        logger.warning(f"Could not remove webhook: {e}")
+    
+    # Start polling with retry logic
+    while True:
         try:
-            bot.polling(none_stop=True, interval=1, timeout=20)
+            logger.info("🔄 Starting bot polling...")
+            bot.polling(none_stop=True, interval=1, timeout=30)
         except Exception as e:
-            logger.error(f"Bot polling error: {str(e)}")
-            sys.exit(1)
+            logger.error(f"❌ Polling error: {str(e)}")
+            logger.info("🔄 Restarting in 5 seconds...")
+            time.sleep(5)
