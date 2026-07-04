@@ -5,6 +5,7 @@ import json
 import requests
 import random
 import time
+import threading
 from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -18,7 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app (needed for Railway health checks)
+# Initialize Flask app
 app = Flask(__name__)
 
 # Bot configuration
@@ -35,8 +36,6 @@ user_sessions = {}
 HAS_API = bool(SPOONACULAR_API_KEY)
 if not HAS_API:
     logger.warning("⚠️ SPOONACULAR_API_KEY not set. Using mock recipes only.")
-else:
-    logger.info("✅ Spoonacular API key found. Using real recipes.")
 
 # ========================
 # TELEGRAM BOT HANDLERS
@@ -46,11 +45,6 @@ else:
 def send_welcome(message):
     """Handle /start and /hello commands"""
     user_name = message.from_user.first_name or "there"
-    
-    if HAS_API:
-        api_status = "✅ Connected to recipe database"
-    else:
-        api_status = "📚 Using built-in recipe collection"
     
     welcome_text = f"""
 👋 *Welcome to RecipeFiinderBot, {user_name}!*
@@ -71,7 +65,7 @@ I'm your recipe assistant that helps you find delicious recipes!
 
 🎯 *Example:* Try typing "pasta" or "chicken"
 
-{api_status}
+📚 Using built-in recipe collection
 Happy cooking! 🍳
 """
     bot.reply_to(message, welcome_text, parse_mode='Markdown')
@@ -101,8 +95,6 @@ def send_help(message):
 💡 Be specific for better results
 💡 Try different search terms
 💡 Get creative with ingredients
-
-Need help? Just ask me anything! 🍳
 """
     bot.reply_to(message, help_text, parse_mode='Markdown')
 
@@ -127,27 +119,7 @@ def random_recipe(message):
     """Handle /random command"""
     bot.reply_to(message, "🎲 Finding a random recipe for you...", parse_mode='Markdown')
     
-    # Try API first if available
-    if HAS_API:
-        try:
-            url = "https://api.spoonacular.com/recipes/random"
-            params = {
-                "apiKey": SPOONACULAR_API_KEY,
-                "number": 1
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('recipes'):
-                    recipe = data['recipes'][0]
-                    send_recipe_details(message, recipe)
-                    return
-        except Exception as e:
-            logger.error(f"Random recipe API error: {str(e)}")
-    
-    # Fallback: Use mock recipes
+    # Use mock recipes
     mock_categories = list(MOCK_RECIPES.keys())
     random_category = random.choice(mock_categories)
     mock_recipes = MOCK_RECIPES[random_category]
@@ -171,43 +143,16 @@ def cuisine_search(message):
         )
         return
     
-    if HAS_API:
-        # Use API
-        bot.reply_to(message, f"🔍 Searching for {cuisine_type} recipes...", parse_mode='Markdown')
-        
-        url = "https://api.spoonacular.com/recipes/complexSearch"
-        params = {
-            "apiKey": SPOONACULAR_API_KEY,
-            "cuisine": cuisine_type,
-            "number": 3,
-            "addRecipeInformation": True
-        }
-        
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('results'):
-                    results = data['results'][:3]
-                    for recipe in results:
-                        send_recipe_preview(message, recipe)
-                    
-                    bot.send_message(
-                        message.chat.id,
-                        f"✅ Found {len(results)} {cuisine_type} recipes!",
-                        parse_mode='Markdown'
-                    )
-                    return
-        except Exception as e:
-            logger.error(f"Cuisine search API error: {str(e)}")
-    
-    # Fallback: Suggest mock recipes
+    # Suggest mock recipes for cuisine
     mock_keywords = {
         'italian': ['pasta', 'spaghetti', 'lasagna'],
         'mexican': ['tacos', 'enchiladas', 'burritos'],
         'chinese': ['stir fry', 'noodles', 'fried rice'],
-        'indian': ['curry', 'tikka', 'biryani']
+        'indian': ['curry', 'tikka', 'biryani'],
+        'french': ['croissant', 'quiche', 'ratatouille'],
+        'japanese': ['sushi', 'ramen', 'teriyaki'],
+        'thai': ['pad thai', 'curry', 'noodles'],
+        'mediterranean': ['salad', 'hummus', 'falafel']
     }
     
     suggestions = mock_keywords.get(cuisine_type.lower(), ['pasta', 'salad', 'chicken'])
@@ -233,60 +178,18 @@ def ingredients_search(message):
         )
         return
     
-    if HAS_API:
-        bot.reply_to(message, f"🛒 Searching recipes with: *{ingredients}*...", parse_mode='Markdown')
-        
-        ingredients_list = [i.strip() for i in ingredients.split(',')]
-        ingredients_query = ','.join(ingredients_list)
-        
-        url = "https://api.spoonacular.com/recipes/findByIngredients"
-        params = {
-            "apiKey": SPOONACULAR_API_KEY,
-            "ingredients": ingredients_query,
-            "number": 3
-        }
-        
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data:
-                    for recipe in data[:3]:
-                        title = recipe.get('title', 'Untitled Recipe')
-                        image_url = recipe.get('image', '')
-                        missed = len(recipe.get('missedIngredients', []))
-                        used = len(recipe.get('usedIngredients', []))
-                        
-                        caption = f"🍽️ *{title}*\n"
-                        caption += f"✅ {used} ingredients you have\n"
-                        caption += f"❌ {missed} ingredients missing"
-                        
-                        if image_url:
-                            bot.send_photo(message.chat.id, image_url, caption=caption, parse_mode='Markdown')
-                        else:
-                            bot.send_message(message.chat.id, caption, parse_mode='Markdown')
-                    
-                    bot.send_message(
-                        message.chat.id,
-                        f"✅ Found {len(data[:3])} recipes you can make!",
-                        parse_mode='Markdown'
-                    )
-                    return
-        except Exception as e:
-            logger.error(f"Ingredients search API error: {str(e)}")
+    # Suggest recipes with ingredients
+    suggestions = ingredients.split(',')
+    main_ingredient = suggestions[0].strip() if suggestions else 'chicken'
     
-    # Fallback suggestion
-    bot.reply_to(
-        message,
-        f"🛒 Searching for recipes with: *{ingredients}*\n\n"
-        f"Try using one of these in your search:\n"
-        f"• 'pasta with {ingredients.split(',')[0]}'\n"
-        f"• 'chicken and rice'\n"
-        f"• 'simple vegetable soup'\n\n"
-        f"Or try searching by dish name! 🍳",
-        parse_mode='Markdown'
-    )
+    suggestion_text = f"🛒 Searching for recipes with: *{ingredients}*\n\n"
+    suggestion_text += f"Try searching for:\n"
+    suggestion_text += f"• '{main_ingredient} pasta'\n"
+    suggestion_text += f"• '{main_ingredient} salad'\n"
+    suggestion_text += f"• '{main_ingredient} soup'\n\n"
+    suggestion_text += "💡 Or type any dish name to search!"
+    
+    bot.reply_to(message, suggestion_text, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
@@ -306,107 +209,15 @@ def handle_text(message):
     search_recipes(message, query)
 
 def search_recipes(message, query):
-    """Search recipes using Spoonacular API or fallback to mock"""
+    """Search recipes using mock database"""
     bot.reply_to(message, f"🔍 Searching for: *{query}*...", parse_mode='Markdown')
     
-    # Try API first if available
-    if HAS_API:
-        try:
-            url = "https://api.spoonacular.com/recipes/complexSearch"
-            params = {
-                "apiKey": SPOONACULAR_API_KEY,
-                "query": query,
-                "number": Config.MAX_RECIPES,
-                "addRecipeInformation": True
-            }
-            
-            response = requests.get(url, params=params, timeout=15)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                if data.get('results'):
-                    results = data['results'][:Config.MAX_RECIPES]
-                    
-                    for recipe in results:
-                        send_recipe_preview(message, recipe)
-                    
-                    bot.send_message(
-                        message.chat.id,
-                        f"✅ Found {len(results)} recipes for '{query}'!",
-                        parse_mode='Markdown'
-                    )
-                    return
-        except Exception as e:
-            logger.error(f"API search error for '{query}': {str(e)}")
-    
-    # Fallback: Use mock recipes
+    # Use mock recipes
     recipe = get_mock_recipe(query)
     send_mock_recipe_details(message, recipe, query)
 
-def send_recipe_preview(message, recipe):
-    """Send a preview of a recipe from API"""
-    recipe_id = recipe.get('id')
-    title = recipe.get('title', 'Untitled Recipe')
-    image_url = recipe.get('image', '')
-    ready_in = recipe.get('readyInMinutes', 'N/A')
-    servings = recipe.get('servings', 'N/A')
-    
-    caption = f"🍽️ *{title}*\n"
-    caption += f"⏱️ Time: {ready_in} mins\n"
-    caption += f"👥 Servings: {servings}\n"
-    
-    keyboard = InlineKeyboardMarkup()
-    view_button = InlineKeyboardButton(
-        "👀 View Details",
-        callback_data=f"details_{recipe_id}"
-    )
-    keyboard.add(view_button)
-    
-    try:
-        if image_url:
-            bot.send_photo(message.chat.id, image_url, caption=caption, parse_mode='Markdown', reply_markup=keyboard)
-        else:
-            bot.send_message(message.chat.id, caption, parse_mode='Markdown', reply_markup=keyboard)
-    except Exception as e:
-        logger.error(f"Error sending recipe preview: {str(e)}")
-        bot.send_message(message.chat.id, caption, parse_mode='Markdown', reply_markup=keyboard)
-
-def send_recipe_details(message, recipe):
-    """Send detailed recipe information from API"""
-    title = recipe.get('title', 'Untitled Recipe')
-    image_url = recipe.get('image', '')
-    ready_in = recipe.get('readyInMinutes', 'N/A')
-    servings = recipe.get('servings', 'N/A')
-    
-    caption = f"🍳 *{title}*\n"
-    caption += f"⏱️ Ready in: {ready_in} mins\n"
-    caption += f"👥 Servings: {servings}\n"
-    
-    if recipe.get('summary'):
-        summary = clean_html(recipe['summary'])[:300]
-        caption += f"\n📝 *Description:*\n{summary}...\n"
-    
-    if recipe.get('extendedIngredients'):
-        caption += f"\n📋 *Ingredients:*\n"
-        for ing in recipe['extendedIngredients'][:5]:
-            caption += f"• {ing.get('original', '')}\n"
-    
-    if recipe.get('instructions'):
-        instructions = clean_html(recipe['instructions'])[:400]
-        caption += f"\n📝 *Instructions:*\n{instructions}..."
-    
-    try:
-        if image_url:
-            bot.send_photo(message.chat.id, image_url, caption=caption[:1000], parse_mode='Markdown')
-        else:
-            bot.send_message(message.chat.id, caption[:1000], parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error sending recipe details: {str(e)}")
-        bot.send_message(message.chat.id, caption[:1000], parse_mode='Markdown')
-
 def send_mock_recipe_details(message, recipe, query):
-    """Send a mock recipe when API is unavailable"""
+    """Send a mock recipe"""
     title = recipe.get('title', f'{query.title()} Recipe')
     ready_in = recipe.get('readyInMinutes', '30-45')
     servings = recipe.get('servings', '4')
@@ -431,42 +242,9 @@ def send_mock_recipe_details(message, recipe, query):
     caption += "• Substitute ingredients as needed\n"
     caption += "• Have fun and get creative!"
     
-    if not HAS_API:
-        caption += "\n\nℹ️ *Note:* Using built-in recipe collection. Get your free Spoonacular API key for more recipes!"
+    caption += "\n\nℹ️ *Note:* Using built-in recipe collection. Get your free Spoonacular API key at spoonacular.com for more recipes!"
     
     bot.send_message(message.chat.id, caption[:1000], parse_mode='Markdown')
-
-# ========================
-# CALLBACK HANDLERS
-# ========================
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('details_'))
-def handle_details_callback(call):
-    """Handle 'View Details' button clicks"""
-    recipe_id = call.data.replace('details_', '')
-    bot.answer_callback_query(call.id, "Loading recipe details...")
-    
-    if HAS_API and recipe_id.isdigit():
-        try:
-            url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
-            params = {"apiKey": SPOONACULAR_API_KEY}
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                recipe = response.json()
-                send_recipe_details(call.message, recipe)
-                return
-        except Exception as e:
-            logger.error(f"Details callback error: {str(e)}")
-    
-    # Fallback
-    bot.send_message(
-        call.message.chat.id,
-        "📚 Recipe details are currently in mock mode.\n"
-        "Try searching for a specific dish like 'pasta' or 'chicken'!",
-        parse_mode='Markdown'
-    )
 
 # ========================
 # FLASK ROUTES (For Railway Health Checks)
@@ -479,8 +257,8 @@ def index():
         'status': 'active',
         'bot': '@RecipeFiinderBot',
         'version': '1.0.0',
-        'api_connected': HAS_API,
-        'mode': 'polling'
+        'mode': 'polling',
+        'api_connected': HAS_API
     })
 
 @app.route('/health', methods=['GET'])
@@ -488,28 +266,47 @@ def health_check():
     """Health check for Railway"""
     return jsonify({'status': 'healthy', 'api': HAS_API}), 200
 
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook endpoint (kept for compatibility)"""
+    return jsonify({'status': 'ok'}), 200
+
+# ========================
+# START BOT IN BACKGROUND THREAD
+# ========================
+
+def start_bot_polling():
+    """Start the bot in polling mode"""
+    logger.info("🤖 Starting bot polling in background thread...")
+    
+    # Remove any existing webhook
+    try:
+        bot.remove_webhook()
+        logger.info("✅ Webhook removed")
+    except Exception as e:
+        logger.warning(f"Could not remove webhook: {e}")
+    
+    # Start polling with retry
+    while True:
+        try:
+            logger.info("🔄 Bot is listening for messages...")
+            bot.polling(none_stop=True, interval=1, timeout=30)
+        except Exception as e:
+            logger.error(f"❌ Polling error: {str(e)}")
+            logger.info("🔄 Restarting polling in 5 seconds...")
+            time.sleep(5)
+
 # ========================
 # APPLICATION ENTRY POINT
 # ========================
 
+# Start bot polling in background thread when app starts
+bot_thread = threading.Thread(target=start_bot_polling, daemon=True)
+bot_thread.start()
+logger.info("✅ Bot polling thread started")
+
+# For local testing
 if __name__ == '__main__':
-    logger.info("🤖 RecipeFiinderBot starting...")
-    logger.info(f"📊 API Status: {'Connected' if HAS_API else 'Using mock recipes'}")
-    logger.info("✅ Bot is running in POLLING mode (more reliable for Railway)")
-    
-    # Remove webhook to ensure polling works
-    try:
-        bot.remove_webhook()
-        logger.info("✅ Webhook removed successfully")
-    except Exception as e:
-        logger.warning(f"Could not remove webhook: {e}")
-    
-    # Start polling with retry logic
-    while True:
-        try:
-            logger.info("🔄 Starting bot polling...")
-            bot.polling(none_stop=True, interval=1, timeout=30)
-        except Exception as e:
-            logger.error(f"❌ Polling error: {str(e)}")
-            logger.info("🔄 Restarting in 5 seconds...")
-            time.sleep(5)
+    logger.info("🚀 Starting Flask app with bot polling...")
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
